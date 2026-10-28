@@ -1,0 +1,856 @@
+[CubeDungeons (5).html](https://github.com/user-attachments/files/34093725/CubeDungeons.5.html)
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Cube Dungeons</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#0b0e16;height:100%;}
+  canvas{display:block;cursor:crosshair;}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<input type="file" id="fileIn" accept="image/png" style="display:none">
+<script>
+'use strict';
+// ================= базовое =================
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let W = innerWidth, H = innerHeight;
+function resize(){ W = innerWidth; H = innerHeight; cv.width = W; cv.height = H; }
+addEventListener('resize', resize); resize();
+
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+const dist2=(x1,y1,x2,y2)=>Math.hypot(x1-x2,y1-y2);
+const rnd=(a,b)=>a+Math.random()*(b-a);
+
+// ================= скины =================
+let skins = [];        // [{name, data}]
+let skinImgs = [];     // Image[]
+let selSkin = -1;
+function saveSkins(){ try{ localStorage.setItem('cd_skins', JSON.stringify({list:skins, sel:selSkin})); }catch(e){} }
+function loadSkins(){
+  try{
+    const d = JSON.parse(localStorage.getItem('cd_skins')||'{"list":[],"sel":-1}');
+    skins = d.list||[]; selSkin = d.sel;
+  }catch(e){ skins=[]; selSkin=-1; }
+  if(typeof selSkin!=='number') selSkin=-1;
+  if(selSkin>=skins.length) selSkin = skins.length-1;
+  rebuildSkinImgs();
+}
+function rebuildSkinImgs(){
+  skinImgs = skins.map(s=>{ const im=new Image(); im.src=s.data; return im; });
+}
+function skinImgOf(i){
+  if(i>=0 && skinImgs[i] && skinImgs[i].complete && skinImgs[i].naturalWidth>0) return skinImgs[i];
+  return null;
+}
+loadSkins();
+
+// ================= персонаж =================
+function drawChar(c, x, y, size, rot, ph, im){
+  c.save(); c.translate(x,y);
+  const a = Math.atan2(Math.sin(rot), Math.cos(rot));
+  const dir = (Math.cos(a)>=0)?1:-1;
+  const u = size/32; c.scale(dir*u, u);
+  const sw = Math.sin(ph)*2.5;
+  const ok = im && im.complete && im.naturalWidth>0;
+  // ноги
+  if(ok){ c.drawImage(im,4,16,4,12,-4,-12+sw*0.4,4,12); c.drawImage(im,20,16,4,12,0,-12-sw*0.4,4,12); }
+  else { c.fillStyle='#3b4d86'; c.fillRect(-4,-12+sw*0.4,4,12); c.fillRect(0,-12-sw*0.4,4,12); }
+  // тело
+  if(ok){ c.drawImage(im,20,20,8,12,-4,-24,8,12); }
+  else { c.fillStyle='#2f7d4f'; c.fillRect(-4,-24,8,12); }
+  // руки
+  c.save(); c.translate(-4,-24); c.rotate(0.15+sw*0.06);
+  if(ok) c.drawImage(im,44,20,4,12,0,0,4,12); else { c.fillStyle='#c98b5e'; c.fillRect(0,0,4,12); }
+  c.restore();
+  c.save(); c.translate(4,-24); c.rotate(-0.15+sw*0.06);
+  if(ok) c.drawImage(im,44,20,4,12,0,0,4,12); else { c.fillStyle='#c98b5e'; c.fillRect(0,0,4,12); }
+  c.restore();
+  // голова
+  if(ok){ c.drawImage(im,8,8,8,8,-4,-32,8,8); }
+  else { c.fillStyle='#c98b5e'; c.fillRect(-4,-32,8,8); c.fillStyle='#1c1c22'; c.fillRect(-2.5,-29,1.6,1.6); c.fillRect(0.9,-29,1.6,1.6); }
+  c.restore();
+}
+
+// ================= состояние =================
+const ST = {MENU:0, PLAY:1, PAUSE:2, DEAD:3, OVER:4};
+let state = ST.MENU;
+let heroOpen=false, shopOpen=false, invOpen=false, exitOpen=false, setPanel=null; // setPanel: 'acc'|'set'
+let msg='', msgT=0;
+let waveBanner='', waveBannerT=0;
+let saveTick=0;
+
+const player = {x:0,y:0,hp:100,maxHp:100,souls:0,emeralds:0,arrows:0,potions:0,
+  weapon:'stone', hasBow:false, rot:0, ph:0, atkCd:0, atkAnim:0, tx:0, ty:0, hasTarget:false, walkPh:0};
+
+let mobs=[], items=[], arrows=[], particles=[];
+let wave=1, waveState='rest', waveTimer=3;
+let cam={x:0,y:0};
+let menuPh=0;
+
+const WEAP = {stone:{name:'Каменный',dmg:12},gold:{name:'Золотой',dmg:22},diamond:{name:'Алмазный',dmg:35}};
+const houses=[]; for(let i=0;i<6;i++){ const a=i*Math.PI/3+0.4; houses.push({x:Math.cos(a)*300,y:Math.sin(a)*300,hp:100,maxHp:100}); }
+let villagers=[]; function spawnVillagers(){ villagers=[]; for(let i=0;i<4;i++){ const a=rnd(0,6.28); villagers.push({x:Math.cos(a)*140,y:Math.sin(a)*140,hp:50,maxHp:50,tx:0,ty:0,wt:0}); } }
+
+function resetGame(){
+  mobs=[]; items=[]; arrows=[]; particles=[];
+  player.x=0; player.y=60; player.hp=100; player.maxHp=100; player.souls=0;
+  player.emeralds=12; player.arrows=0; player.potions=1; player.weapon='stone'; player.hasBow=false;
+  player.rot=0; player.ph=0; player.atkCd=0; player.hasTarget=false;
+  for(const h of houses){ h.hp=h.maxHp; }
+  spawnVillagers();
+  wave=1; waveState='rest'; waveTimer=4;
+  cam.x=player.x-W/2; cam.y=player.y-H/2;
+}
+
+// ================= сохранение =================
+function hasSave(){ try{ return !!localStorage.getItem('cd_save'); }catch(e){ return false; } }
+function doSave(){
+  try{
+    localStorage.setItem('cd_save', JSON.stringify({
+      p:{x:player.x,y:player.y,hp:player.hp,souls:player.souls,emeralds:player.emeralds,
+         arrows:player.arrows,potions:player.potions,weapon:player.weapon,hasBow:player.hasBow},
+      wave:wave, hs:houses.map(h=>h.hp), items:items.slice(0,40),
+      vhp:villagers.map(v=>v.hp)
+    }));
+  }catch(e){}
+}
+function doLoad(){
+  try{
+    const d = JSON.parse(localStorage.getItem('cd_save'));
+    if(!d) return false;
+    resetGame();
+    Object.assign(player, d.p);
+    wave = d.wave||1;
+    if(d.hs) d.hs.forEach((v,i)=>{ if(houses[i]) houses[i].hp=v; });
+    if(d.items) items = d.items.map(it=>({x:it.x,y:it.y,type:it.type}));
+    if(d.vhp) d.vhp.forEach((v,i)=>{ if(villagers[i]) villagers[i].hp=v; });
+    cam.x=player.x-W/2; cam.y=player.y-H/2;
+    waveBanner='Волна '+wave; waveBannerT=2;
+    return true;
+  }catch(e){ return false; }
+}
+
+// ================= ввод =================
+let keys={};
+let mx=W/2, my=H/2;
+cv.addEventListener('contextmenu', e=>e.preventDefault());
+cv.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
+let buttons=[];
+cv.addEventListener('mousedown', e=>{
+  const x=e.clientX, y=e.clientY;
+  for(const b of buttons){ if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h){ b.fn(); return; } }
+  if(state===ST.PLAY && !shopOpen && !invOpen){
+    if(e.button===2){ player.tx=cam.x+x; player.ty=cam.y+y; player.hasTarget=true; }
+    if(e.button===0){ shootArrow(); }
+  }
+});
+addEventListener('keydown', e=>{
+  keys[e.code]=true;
+  if(e.code==='Tab'){ e.preventDefault(); if(state===ST.PLAY){ invOpen=!invOpen; shopOpen=false; } }
+  if(state===ST.PLAY && !shopOpen && !invOpen){
+    if(e.code==='KeyX'||e.code==='KeyK') melee();
+    if(e.code==='KeyT'||e.code==='KeyE') special();
+    if(e.code==='KeyQ'||e.code==='KeyJ') drinkPotion();
+    if(e.code==='KeyF'||e.code==='KeyA2') interact();
+    if(e.code==='KeyC') shootArrow();
+    if(e.code==='Escape'){ state=ST.PAUSE; }
+  } else if(shopOpen && e.code==='Escape'){ shopOpen=false; }
+  else if(invOpen && e.code==='Escape'){ invOpen=false; }
+  else if(state===ST.PAUSE && e.code==='Escape'){ state=ST.PLAY; }
+  else if(state===ST.MENU && e.code==='KeyH'){ heroOpen=!heroOpen; }
+  else if(heroOpen && e.code==='Escape'){ heroOpen=false; }
+  else if(setPanel && e.code==='Escape'){ setPanel=null; }
+  else if(exitOpen && e.code==='Escape'){ exitOpen=false; }
+});
+addEventListener('keyup', e=>{ keys[e.code]=false; });
+
+// ================= действия =================
+function melee(){
+  if(player.atkCd>0) return;
+  player.atkCd=0.4; player.atkAnim=0.25;
+  const dmg=WEAP[player.weapon].dmg;
+  for(const m of mobs){
+    const d=dist2(m.x,m.y,player.x,player.y);
+    if(d<75){ const a=Math.atan2(m.y-player.y,m.x-player.x);
+      let da=Math.abs(a-player.rot); if(da>Math.PI) da=2*Math.PI-da;
+      if(da<1.6){ hurtMob(m,dmg); } }
+  }
+}
+function special(){
+  if(player.souls<100) { flash('Шкала душ не полна'); return; }
+  player.souls=0;
+  for(let i=0;i<40;i++) particles.push({x:player.x,y:player.y,vx:rnd(-200,200),vy:rnd(-200,200),t:0.6,c:'#6cc4ff'});
+  for(const m of mobs){ if(dist2(m.x,m.y,player.x,player.y)<180) hurtMob(m,60); }
+  flash('Особая атака!');
+}
+function shootArrow(){
+  if(state!==ST.PLAY||!player.hasBow) return;
+  if(player.arrows<=0){ flash('Нет стрел'); return; }
+  player.arrows--;
+  const a=Math.atan2(my+cam.y-(player.y-20), mx+cam.x-player.x);
+  arrows.push({x:player.x,y:player.y-20,vx:Math.cos(a)*420,vy:Math.sin(a)*420,t:1.6});
+}
+function drinkPotion(){
+  if(player.potions<=0){ flash('Нет зелий'); return; }
+  player.potions--; player.hp=clamp(player.hp+50,0,player.maxHp);
+  for(let i=0;i<14;i++) particles.push({x:player.x,y:player.y-20,vx:rnd(-60,60),vy:rnd(-90,-20),t:0.7,c:'#e44'});
+  flash('Зелье выпито');
+}
+function interact(){
+  // подбор предметов
+  let best=null,bd=55;
+  for(const it of items){ const d=dist2(it.x,it.y,player.x,player.y); if(d<bd){bd=d;best=it;} }
+  if(best){
+    if(best.type==='emerald'){ player.emeralds++; }
+    else { player.potions++; }
+    items.splice(items.indexOf(best),1);
+    return;
+  }
+  // торговля
+  for(const v of villagers){
+    if(v.hp>0 && dist2(v.x,v.y,player.x,player.y)<80){ shopOpen=true; return; }
+  }
+  flash('Рядом нет жителя или предмета');
+}
+function hurtMob(m,dmg){
+  m.hp-=dmg; m.flash=0.15;
+  if(m.hp<=0){
+    mobs.splice(mobs.indexOf(m),1);
+    player.souls=clamp(player.souls+10,0,100);
+    const r=Math.random();
+    if(r<0.6) items.push({x:m.x,y:m.y,type:'emerald'});
+    else if(r<0.72) items.push({x:m.x,y:m.y,type:'potion'});
+  }
+}
+function hurtHouse(h,dmg){ h.hp=clamp(h.hp-dmg,0,h.maxHp); }
+function flash(t){ msg=t; msgT=1.6; }
+
+// ================= волны =================
+function spawnWave(){
+  waveState='fight'; waveBanner='Волна '+wave; waveBannerT=2;
+  const nZ=3+wave*2, nC=wave>=2?wave:1;
+  for(let i=0;i<nZ;i++){
+    const a=rnd(0,6.28), r=700+rnd(0,120);
+    mobs.push({type:'z',x:Math.cos(a)*r,y:Math.sin(a)*r,hp:26+wave*5,maxHp:26+wave*5,cd:0,flash:0});
+  }
+  for(let i=0;i<nC;i++){
+    const a=rnd(0,6.28), r=700+rnd(0,120);
+    mobs.push({type:'c',x:Math.cos(a)*r,y:Math.sin(a)*r,hp:20+wave*3,maxHp:20+wave*3,fuse:-1,flash:0});
+  }
+}
+function updateWave(dt){
+  if(waveState==='rest'){
+    waveTimer-=dt;
+    if(waveTimer<=0){ spawnWave();
+      for(const v of villagers){ if(v.hp<=0){ v.hp=50; const a=rnd(0,6.28); v.x=Math.cos(a)*140; v.y=Math.sin(a)*140; } }
+    }
+  } else {
+    if(mobs.length===0){ waveState='rest'; waveTimer=6; wave++;
+      player.hp=clamp(player.hp+20,0,player.maxHp);
+    }
+  }
+}
+
+// ================= апдейт =================
+function update(dt){
+  menuPh+=dt*3;
+  if(state!==ST.PLAY) return;
+  if(shopOpen||invOpen) return;
+
+  // игрок
+  let vx=0,vy=0;
+  if(keys['KeyW']||keys['ArrowUp'])vy-=1;
+  if(keys['KeyS']||keys['ArrowDown'])vy+=1;
+  if(keys['KeyA']||keys['ArrowLeft'])vx-=1;
+  if(keys['KeyD']||keys['ArrowRight'])vx+=1;
+  if(vx||vy){ player.hasTarget=false; }
+  else if(player.hasTarget){
+    const d=dist2(player.x,player.y,player.tx,player.ty);
+    if(d<8){ player.hasTarget=false; }
+    else { vx=(player.tx-player.x)/d; vy=(player.ty-player.y)/d; }
+  }
+  const sp=160;
+  if(vx||vy){
+    const l=Math.hypot(vx,vy); vx/=l; vy/=l;
+    player.x+=vx*sp*dt; player.y+=vy*sp*dt;
+    player.rot=Math.atan2(vy,vx);
+    player.walkPh+=dt*10; player.ph=player.walkPh;
+  } else player.ph+=dt*2;
+
+  player.atkCd=Math.max(0,player.atkCd-dt);
+  player.atkAnim=Math.max(0,player.atkAnim-dt);
+
+  // камера
+  cam.x+= (player.x-W/2-cam.x)*Math.min(1,dt*8);
+  cam.y+= (player.y-H/2-cam.y)*Math.min(1,dt*8);
+
+  updateWave(dt);
+
+  // мобы
+  for(const m of mobs){
+    m.flash=Math.max(0,(m.flash||0)-dt);
+    let tx=null,ty=null,tIsHouse=false,th=null;
+    let bd=1e9;
+    if(player.hp>0){ const d=dist2(m.x,m.y,player.x,player.y); if(d<bd){bd=d;tx=player.x;ty=player.y;} }
+    for(const v of villagers){ if(v.hp>0){ const d=dist2(m.x,m.y,v.x,v.y); if(d<bd){bd=d;tx=v.x;ty=v.y;} } }
+    for(const h of houses){ if(h.hp>0){ const d=dist2(m.x,m.y,h.x,h.y); if(d<bd){bd=d;tx=h.x;ty=h.y;th=h;} } }
+    if(tx===null) continue;
+    if(m.type==='z'){
+      if(bd>34){ m.x+=(tx-m.x)/bd*55*dt; m.y+=(ty-m.y)/bd*55*dt; m.cd=Math.max(0,m.cd-dt); }
+      else if(m.cd<=0){
+        m.cd=1;
+        if(th) hurtHouse(th,8);
+        else if(bd<40 && player.hp>0 && dist2(m.x,m.y,player.x,player.y)<40) { player.hp-=8; if(player.hp<=0){ state=ST.DEAD; } }
+        else { for(const v of villagers){ if(v.hp>0&&dist2(m.x,m.y,v.x,v.y)<40){ v.hp-=8; if(v.hp<=0){v.hp=0;} break; } } }
+      }
+    } else {
+      if(m.fuse>=0){
+        m.fuse-=dt;
+        if(m.fuse<=0){
+          mobs.splice(mobs.indexOf(m),1);
+          for(let i=0;i<30;i++) particles.push({x:m.x,y:m.y,vx:rnd(-260,260),vy:rnd(-260,260),t:0.7,c:'#9e9'});
+          // взрыв
+          if(dist2(m.x,m.y,player.x,player.y)<100){ player.hp-=30; if(player.hp<=0) state=ST.DEAD; }
+          for(const h of houses){ if(h.hp>0&&dist2(m.x,m.y,h.x,h.y)<110) hurtHouse(h,40); }
+          for(const v of villagers){ if(v.hp>0&&dist2(m.x,m.y,v.x,v.y)<100) v.hp-=30; }
+          for(const mm of mobs.slice()){ if(mm!==m&&dist2(m.x,m.y,mm.x,mm.y)<100) hurtMob(mm,25); }
+        }
+      } else {
+        if(bd>40){ m.x+=(tx-m.x)/bd*75*dt; m.y+=(ty-m.y)/bd*75*dt; }
+        else m.fuse=1.2;
+      }
+    }
+  }
+
+  // жители
+  for(const v of villagers){
+    if(v.hp<=0) continue;
+    v.wt-=dt;
+    if(v.wt<=0){ v.wt=rnd(1,3); const a=rnd(0,6.28); v.tx=140*Math.cos(a); v.ty=140*Math.sin(a); }
+    const d=dist2(v.x,v.y,v.tx,v.ty);
+    if(d>6){ v.x+=(v.tx-v.x)/d*30*dt; v.y+=(v.ty-v.y)/d*30*dt; }
+  }
+
+  // стрелы
+  for(const ar of arrows.slice()){
+    ar.t-=dt; ar.x+=ar.vx*dt; ar.y+=ar.vy*dt;
+    if(ar.t<=0){ arrows.splice(arrows.indexOf(ar),1); continue; }
+    for(const m of mobs){
+      if(dist2(m.x,m.y-14,ar.x,ar.y)<26){ hurtMob(m,14); arrows.splice(arrows.indexOf(ar),1); break; }
+    }
+  }
+
+  // частицы
+  for(const p of particles.slice()){ p.t-=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; if(p.t<=0) particles.splice(particles.indexOf(p),1); }
+
+  if(waveBannerT>0) waveBannerT-=dt;
+  if(msgT>0) msgT-=dt;
+  saveTick+=dt; if(saveTick>6){ saveTick=0; doSave(); }
+}
+
+// ================= земля (паттерн) =================
+const gpat = (()=>{
+  const c=document.createElement('canvas'); c.width=64; c.height=64;
+  const g=c.getContext('2d');
+  g.fillStyle='#3f6b35'; g.fillRect(0,0,64,64);
+  for(let i=0;i<90;i++){ g.fillStyle=Math.random()<0.5?'#3a6330':'#457439';
+    g.fillRect(Math.random()*64|0,Math.random()*64|0,3,3); }
+  return ctx.createPattern(c,'repeat');
+})();
+
+// ================= отрисовка мира =================
+function drawWorld(){
+  ctx.fillStyle=gpat;
+  ctx.save(); ctx.translate(-cam.x%64,-cam.y%64); ctx.fillRect(0,0,W+64,H+64); ctx.restore();
+
+  // колодец
+  const wx=0-cam.x, wy=0-cam.y;
+  ctx.fillStyle='#8a8f96'; ctx.beginPath(); ctx.arc(wx,wy,26,0,7); ctx.fill();
+  ctx.fillStyle='#2c4a6b'; ctx.beginPath(); ctx.arc(wx,wy,16,0,7); ctx.fill();
+
+  // дома
+  for(const h of houses){
+    const hx=h.x-cam.x, hy=h.y-cam.y;
+    if(hx<-120||hx>W+120||hy<-120||hy>H+120) continue;
+    ctx.fillStyle='#6b4a2b'; ctx.fillRect(hx-45,hy-60,90,60);
+    ctx.fillStyle='#8a6238';
+    ctx.beginPath(); ctx.moveTo(hx-52,hy-60); ctx.lineTo(hx,hy-95); ctx.lineTo(hx+52,hy-60); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#4a3118'; ctx.fillRect(hx-10,hy-28,20,28);
+    ctx.fillStyle='#a33'; if(h.hp<h.maxHp*0.4) ctx.fillStyle='#d33';
+    const bw=90*h.hp/h.maxHp;
+    ctx.fillRect(hx-45,hy-104,bw,6);
+    ctx.strokeStyle='#000'; ctx.strokeRect(hx-45,hy-104,90,6);
+    if(h.hp<=0){ ctx.fillStyle='rgba(60,40,20,0.8)'; ctx.fillRect(hx-45,hy-60,90,60); }
+  }
+
+  // предметы
+  for(const it of items){
+    const ix=it.x-cam.x, iy=it.y-cam.y;
+    if(it.type==='emerald'){ ctx.fillStyle='#3ddc6b'; ctx.save(); ctx.translate(ix,iy-8); ctx.rotate(0.7); ctx.fillRect(-5,-5,10,10); ctx.restore(); }
+    else { ctx.fillStyle='#c14'; ctx.fillRect(ix-6,iy-14,12,14); ctx.fillStyle='#e77'; ctx.fillRect(ix-4,iy-16,8,4); }
+  }
+
+  // жители
+  for(const v of villagers){
+    if(v.hp<=0) continue;
+    const vx2=v.x-cam.x, vy2=v.y-cam.y;
+    drawChar(ctx,vx2,vy2,34,0,menuPh*0.5+vx2*0.01,null);
+    ctx.fillStyle='#c8a06a'; ctx.fillRect(vx2-2,vy2-26,4,4);
+    ctx.fillStyle='#4c4'; ctx.fillRect(vx2-14,vy2-44,28,4);
+    ctx.fillStyle='#4c4'; ctx.fillRect(vx2-14,vy2-44,28*v.hp/v.maxHp,4);
+  }
+
+  // мобы
+  for(const m of mobs){
+    const mx2=m.x-cam.x, my2=m.y-cam.y;
+    if(mx2<-60||mx2>W+60||my2<-80||my2>H+60) continue;
+    if(m.type==='z'){
+      ctx.save();
+      if(m.flash>0) ctx.globalAlpha=0.5;
+      drawChar(ctx,mx2,my2,34,Math.atan2(player.y-m.y,player.x-m.x),menuPh*0.7+mx2*0.02,null);
+      ctx.fillStyle='#4a8f3c'; ctx.fillRect(mx2-4,my2-32,8,8);
+      ctx.fillStyle='#0a2'; ctx.fillRect(mx2-2.5,my2-30,1.5,1.5); ctx.fillRect(mx2+1,my2-30,1.5,1.5);
+      ctx.restore();
+      ctx.fillStyle='#900'; ctx.fillRect(mx2-12,my2-42,24,3);
+      ctx.fillStyle='#e33'; ctx.fillRect(mx2-12,my2-42,24*m.hp/m.maxHp,3);
+    } else {
+      const fl = (m.fuse>=0 && Math.sin(m.fuse*30)>0);
+      ctx.fillStyle=fl?'#e8ffe8':'#5aa845';
+      ctx.fillRect(mx2-9,my2-30,18,22);
+      ctx.fillStyle=fl?'#333':'#2c6b2c';
+      ctx.fillRect(mx2-6,my2-27,4,4); ctx.fillRect(mx2+2,my2-27,4,4);
+      ctx.fillRect(mx2-2,my2-22,4,3);
+      ctx.fillStyle=fl?'#e8ffe8':'#5aa845';
+      ctx.fillRect(mx2-7,my2-8,4,8); ctx.fillRect(mx2+3,my2-8,4,8);
+      ctx.fillStyle='#900'; ctx.fillRect(mx2-12,my2-40,24,3);
+      ctx.fillStyle='#e33'; ctx.fillRect(mx2-12,my2-40,24*m.hp/m.maxHp,3);
+    }
+  }
+
+  // стрелы
+  ctx.strokeStyle='#ddd'; ctx.lineWidth=2;
+  for(const ar of arrows){
+    ctx.beginPath(); ctx.moveTo(ar.x-cam.x,ar.y-cam.y);
+    ctx.lineTo(ar.x-cam.x-ar.vx*0.02,ar.y-cam.y-ar.vy*0.02); ctx.stroke();
+  }
+  ctx.lineWidth=1;
+
+  // частицы
+  for(const p of particles){ ctx.fillStyle=p.c; ctx.globalAlpha=clamp(p.t*1.5,0,1); ctx.fillRect(p.x-cam.x-2,p.y-cam.y-2,4,4); }
+  ctx.globalAlpha=1;
+
+  // метка цели
+  if(player.hasTarget){
+    const tx=player.tx-cam.x, ty=player.ty-cam.y;
+    ctx.strokeStyle='#ffd34d'; ctx.lineWidth=2;
+    const r=6+Math.sin(menuPh*4)*2;
+    ctx.beginPath(); ctx.arc(tx,ty,r,0,7); ctx.stroke();
+    ctx.lineWidth=1;
+  }
+
+  // игрок
+  drawChar(ctx, player.x-cam.x, player.y-cam.y, 38, player.rot, player.ph, skinImgOf(selSkin));
+  if(player.atkAnim>0){
+    const ax=player.x-cam.x+Math.cos(player.rot)*46, ay=player.y-cam.y-16+Math.sin(player.rot)*46;
+    ctx.strokeStyle='#fff'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(ax-Math.cos(player.rot)*20,ay-Math.sin(player.rot)*20); ctx.lineTo(ax,ay); ctx.stroke();
+    ctx.lineWidth=1;
+  }
+}
+
+// ================= HUD =================
+function drawHeart(c,x,y,s,frac){
+  c.save(); c.translate(x,y); c.scale(s,s);
+  c.fillStyle='#222';
+  c.beginPath();
+  c.moveTo(0,3.2); c.bezierCurveTo(-5,-1,-4.5,-4.6,-2.4,-4.6); c.bezierCurveTo(-1,-4.6,0,-3.6,0,-2.6);
+  c.bezierCurveTo(0,-3.6,1,-4.6,2.4,-4.6); c.bezierCurveTo(4.5,-4.6,5,-1,0,3.2);
+  c.closePath(); c.fill();
+  c.fillStyle='#d33';
+  c.beginPath();
+  c.moveTo(0,2.6); c.bezierCurveTo(-4.2,-1,-3.8,-3.9,-2,-3.9); c.bezierCurveTo(-0.9,-3.9,0,-3.1,0,-2.2);
+  c.bezierCurveTo(0,-3.1,0.9,-3.9,2,-3.9); c.bezierCurveTo(3.8,-3.9,4.2,-1,0,2.6);
+  c.closePath(); c.fill();
+  if(frac<1){
+    c.save(); c.beginPath();
+    c.moveTo(0,2.6); c.bezierCurveTo(-4.2,-1,-3.8,-3.9,-2,-3.9); c.bezierCurveTo(-0.9,-3.9,0,-3.1,0,-2.2);
+    c.bezierCurveTo(0,-3.1,0.9,-3.9,2,-3.9); c.bezierCurveTo(3.8,-3.9,4.2,-1,0,2.6);
+    c.closePath(); c.clip();
+    c.fillStyle='#1a1a22'; c.fillRect(-6,(-2.2+2.6*(1-frac))-4,12,8);
+    c.restore();
+  }
+  c.restore();
+}
+function drawHUD(){
+  // изумруды
+  ctx.fillStyle='rgba(20,24,30,0.75)'; ctx.fillRect(12,12,110,34);
+  ctx.fillStyle='#3ddc6b'; ctx.save(); ctx.translate(32,29); ctx.rotate(0.7); ctx.fillRect(-7,-7,14,14); ctx.restore();
+  ctx.fillStyle='#fff'; ctx.font='bold 18px monospace'; ctx.fillText(player.emeralds, 50, 36);
+
+  // волна
+  if(waveBannerT>0){
+    ctx.fillStyle='rgba(10,12,18,0.7)';
+    ctx.fillRect(W/2-90,14,180,36);
+    ctx.fillStyle='#fff'; ctx.font='bold 20px monospace'; ctx.textAlign='center';
+    ctx.fillText(waveBanner, W/2, 40); ctx.textAlign='left';
+  }
+
+  // хотбар
+  const bw=64, gap=8, total=bw*4+gap*3, hx=W/2-total/2, hy=H-96;
+  const slots=[
+    {icon:'sword', label:WEAP[player.weapon].name},
+    {icon:'bow', label:'Лук'},
+    {icon:'arrow', label:'Стрелы '+player.arrows},
+    {icon:'potion', label:'Зелье [Q] '+player.potions}
+  ];
+  for(let i=0;i<4;i++){
+    const x=hx+i*(bw+gap);
+    ctx.fillStyle='rgba(20,24,30,0.8)'; ctx.fillRect(x,hy,bw,bw);
+    ctx.strokeStyle='#555'; ctx.strokeRect(x,hy,bw,bw);
+    const cx=x+bw/2, cy=hy+bw/2;
+    if(i===0){
+      const wc = player.weapon==='gold' ? '#fc0' : (player.weapon==='diamond' ? '#4dd' : '#aaa');
+      ctx.strokeStyle=wc; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(cx-10,cy-10); ctx.lineTo(cx+8,cy+8); ctx.stroke(); ctx.lineWidth=1;
+    }
+    if(i===1 && !player.hasBow){ ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(x+2,hy+2,bw-4,bw-4); }
+    if(i===1){ ctx.strokeStyle='#a74'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(cx+4,cy,11,-1.2,1.2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx+4,cy-11); ctx.lineTo(cx-9,cy); ctx.lineTo(cx+4,cy+11); ctx.stroke(); ctx.lineWidth=1; }
+    if(i===2){ ctx.strokeStyle='#ddd'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx-10,cy+8); ctx.lineTo(cx+10,cy-8); ctx.stroke(); ctx.lineWidth=1; }
+    if(i===3){ ctx.fillStyle='#c14'; ctx.fillRect(cx-7,cy-9,14,14); ctx.fillStyle='#e77'; ctx.fillRect(cx-5,cy-11,10,4); }
+    ctx.fillStyle='#fff'; ctx.font='10px monospace'; ctx.textAlign='center';
+    ctx.fillText(slots[i].label, cx, hy+bw-6); ctx.textAlign='left';
+  }
+
+  // сердце HP
+  drawHeart(ctx, W/2-70, H-30, 8, player.hp/player.maxHp);
+  ctx.fillStyle='#fff'; ctx.font='bold 15px monospace'; ctx.textAlign='center';
+  ctx.fillText(Math.ceil(player.hp)+' / '+player.maxHp, W/2-2, H-24);
+  // шкала душ
+  const sw=120, sx=W/2+34, sy=H-34;
+  ctx.fillStyle='#101a2e'; ctx.fillRect(sx,sy,sw,12);
+  ctx.fillStyle='#2e7dd1'; ctx.fillRect(sx+2,sy+2,(sw-4)*player.souls/100,8);
+  ctx.strokeStyle='#0a1220'; ctx.strokeRect(sx,sy,sw,12);
+  ctx.fillStyle='#9cf'; ctx.font='9px monospace';
+  ctx.fillText('ДУШИ', sx+sw/2-12, sy-3);
+  ctx.textAlign='left';
+
+  // подсказка лавки
+  for(const v of villagers){
+    if(v.hp>0 && dist2(v.x,v.y,player.x,player.y)<80){
+      ctx.fillStyle='rgba(10,12,18,0.8)'; ctx.fillRect(W/2-130,H-140,260,26);
+      ctx.fillStyle='#ffd34d'; ctx.font='13px monospace'; ctx.textAlign='center';
+      ctx.fillText('F — торговать с жителем', W/2, H-122); ctx.textAlign='left';
+    }
+  }
+
+  if(msgT>0){
+    ctx.fillStyle='rgba(10,12,18,0.8)'; ctx.fillRect(W/2-140,H-176,280,26);
+    ctx.fillStyle='#fff'; ctx.font='13px monospace'; ctx.textAlign='center';
+    ctx.fillText(msg, W/2, H-158); ctx.textAlign='left';
+  }
+}
+
+// ================= кнопки =================
+function button(x,y,w,h,label,fn,opts){
+  opts=opts||{};
+  buttons.push({x,y,w,h,label,fn,disabled:!!opts.disabled});
+  ctx.fillStyle=opts.disabled?'rgba(60,60,60,0.85)':(opts.green?'#3a7d2c':'rgba(30,34,44,0.9)');
+  ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle=opts.disabled?'#555':'#e8e8e8'; ctx.lineWidth=2; ctx.strokeRect(x,y,w,h); ctx.lineWidth=1;
+  ctx.fillStyle=opts.disabled?'#999':'#fff'; ctx.font='bold 16px monospace'; ctx.textAlign='center';
+  ctx.fillText(label, x+w/2, y+h/2+6); ctx.textAlign='left';
+}
+
+// ================= меню =================
+function drawMenu(){
+  // ночное небо
+  const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#0b0e1a'); g.addColorStop(1,'#141a2b');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  for(let i=0;i<60;i++){ const sx=(i*137)%W, sy=(i*89)%(H*0.6);
+    ctx.fillStyle='rgba(255,255,255,'+(0.3+0.5*Math.abs(Math.sin(menuPh+i)))+')'; ctx.fillRect(sx,sy,2,2); }
+  // земля
+  ctx.fillStyle='#2b3d26'; ctx.fillRect(0,H*0.55,W,H*0.45);
+  // костёр
+  const fx=W/2+40, fy=H*0.78;
+  ctx.strokeStyle='#6b4a2b'; ctx.lineWidth=5;
+  ctx.beginPath(); ctx.moveTo(fx-16,fy); ctx.lineTo(fx+16,fy-7); ctx.moveTo(fx-16,fy-7); ctx.lineTo(fx+16,fy); ctx.stroke(); ctx.lineWidth=1;
+  const fl=Math.sin(menuPh*7)*3;
+  ctx.fillStyle='#ff8c1a'; ctx.beginPath(); ctx.moveTo(fx-8,fy-6); ctx.quadraticCurveTo(fx,fy-26-fl,fx+8,fy-6); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#ffd34d'; ctx.beginPath(); ctx.moveTo(fx-4,fy-6); ctx.quadraticCurveTo(fx,fy-17-fl,fx+4,fy-6); ctx.closePath(); ctx.fill();
+  const rg=ctx.createRadialGradient(fx,fy-10,10,fx,fy-10,170);
+  rg.addColorStop(0,'rgba(255,150,40,0.28)'); rg.addColorStop(1,'rgba(255,150,40,0)');
+  ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(fx,fy-10,170,0,7); ctx.fill();
+  // палатка
+  const px=W/2-260, py=H*0.78;
+  ctx.fillStyle='#7a5a33';
+  ctx.beginPath(); ctx.moveTo(px-70,py); ctx.lineTo(px,py-95); ctx.lineTo(px+70,py); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#4f3a20';
+  ctx.beginPath(); ctx.moveTo(px-14,py); ctx.lineTo(px,py-46); ctx.lineTo(px+14,py); ctx.closePath(); ctx.fill();
+  // герой у костра
+  drawChar(ctx, W/2-30, H*0.78, 56, 0.6, menuPh*0.8, skinImgOf(selSkin));
+
+  // заголовок
+  ctx.fillStyle='#ffd34d'; ctx.font='bold 46px monospace'; ctx.textAlign='center';
+  ctx.fillText('CUBE DUNGEONS', W/2, 90);
+  ctx.fillStyle='#bba'; ctx.font='15px monospace';
+  ctx.fillText('защити деревню от волн мобов', W/2, 116);
+  ctx.textAlign='left';
+
+  // плашка сезона
+  ctx.fillStyle='rgba(30,34,44,0.9)'; ctx.fillRect(W-260,20,240,70);
+  ctx.strokeStyle='#e8e8e8'; ctx.strokeRect(W-260,20,240,70);
+  ctx.fillStyle='#ffd34d'; ctx.font='bold 30px monospace'; ctx.fillText('50', W-240, 62);
+  ctx.fillStyle='#fff'; ctx.font='13px monospace';
+  ctx.fillText('Season 1', W-190, 44); ctx.fillText('CLOUDY CLIMB', W-190, 64); ctx.fillStyle='#89f'; ctx.fillText('AP', W-190, 82);
+
+  // кнопки
+  buttons=[];
+  const bw=300, bx=W/2-bw/2;
+  let by=H*0.5;
+  button(bx,by,bw,44,'START GAME',()=>{ resetGame(); state=ST.PLAY; }, {green:true}); by+=56;
+  const canCont=hasSave();
+  button(bx,by,bw,44,'CONTINUE',()=>{ if(doLoad()){ state=ST.PLAY; } }, {disabled:!canCont}); by+=56;
+  button(bx,by,bw,44,'HERO SETTINGS [H]',()=>{ heroOpen=true; }); by+=56;
+  button(bx,by,bw,44,'СКИН: ЗАГРУЗИТЬ PNG',()=>{ document.getElementById('fileIn').click(); }); by+=56;
+  button(bx,by,bw,44,'ОФЛАЙН-РЕЖИМ ✓',()=>{});
+  // нижний ряд
+  const bw2=200, gap=16, bx2=W/2-(bw2*3+gap*2)/2, by2=H-60;
+  button(bx2,by2,bw2,40,'Accessibility [F1]',()=>{ setPanel='acc'; });
+  button(bx2+bw2+gap,by2,bw2,40,'Settings [F2]',()=>{ setPanel='set'; });
+  button(bx2+(bw2+gap)*2,by2,bw2,40,'Exit [ESC]',()=>{ exitOpen=true; });
+
+  if(heroOpen) drawHeroPanel();
+  if(setPanel) drawSettingsPanel(setPanel);
+  if(exitOpen){
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.font='bold 22px monospace'; ctx.textAlign='center';
+    ctx.fillText('Спасибо за игру!', W/2, H/2-40); ctx.textAlign='left';
+    buttons=[];
+    button(W/2-110,H/2,220,44,'Вернуться',()=>{ exitOpen=false; }, {green:true});
+  }
+}
+
+// ================= панель скинов =================
+function drawHeroPanel(){
+  ctx.fillStyle='rgba(8,10,16,0.9)'; ctx.fillRect(0,0,W,H);
+  const pw=Math.min(760,W-40), phh=Math.min(560,H-40), px=(W-pw)/2, py=(H-phh)/2;
+  ctx.fillStyle='#1a2030'; ctx.fillRect(px,py,pw,phh);
+  ctx.strokeStyle='#ffd34d'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,phh); ctx.lineWidth=1;
+  ctx.fillStyle='#fff'; ctx.font='bold 20px monospace'; ctx.textAlign='center';
+  ctx.fillText('ВЫБОР ГЕРОЯ', W/2, py+36); ctx.textAlign='left';
+
+  const cols=Math.max(1,Math.floor((pw-40)/150));
+  const cellW=150, cellH=190;
+  // встроенный скин
+  for(let i=0;i<=skins.length;i++){
+    const col=i%cols, row=Math.floor(i/cols);
+    if(py+70+row*cellH+cellH > py+phh-70) break;
+    const cx=px+20+col*cellW, cy2=py+60+row*cellH;
+    const isDef=(i===0), skinIdx=i-1;
+    const selected = isDef ? (selSkin<0) : (selSkin===skinIdx);
+    ctx.fillStyle='rgba(40,46,60,0.9)'; ctx.fillRect(cx,cy2,cellW-10,cellH-10);
+    ctx.strokeStyle=selected?'#3ddc6b':'#666'; ctx.lineWidth=selected?3:1; ctx.strokeRect(cx,cy2,cellW-10,cellH-10); ctx.lineWidth=1;
+    const im = isDef? null : skinImgOf(skinIdx);
+    const ccx=cx+(cellW-10)/2, ccy=cy2+118;
+    // плашка фона превью
+    ctx.fillStyle='#2b3d26'; ctx.fillRect(cx+2,cy2+70,cellW-14,50);
+    drawChar(ctx,ccx,ccy,44,0,menuPh, im);
+    ctx.fillStyle='#fff'; ctx.font='11px monospace'; ctx.textAlign='center';
+    ctx.fillText(isDef?'Келлен (стандарт)':(skins[skinIdx].name||'Скин '+(skinIdx+1)), ccx, cy2+cellH-32);
+    if(selected){ ctx.fillStyle='#3ddc6b'; ctx.fillText('✓ выбран', ccx, cy2+cellH-16); }
+    ctx.textAlign='left';
+    // клик — выбор
+    buttons.push({x:cx,y:cy2,w:cellW-10,h:cellH-16,label:'',fn:()=>{ selSkin=isDef?-1:skinIdx; saveSkins(); }});
+    // удалить
+    if(!isDef){
+      const bx2=cx+cellW-32, by2=cy2+6;
+      ctx.fillStyle='#a33'; ctx.fillRect(bx2,by2,20,20);
+      ctx.fillStyle='#fff'; ctx.font='bold 13px monospace'; ctx.textAlign='center'; ctx.fillText('✕',bx2+10,by2+14); ctx.textAlign='left';
+      const idx=skinIdx;
+      buttons.push({x:bx2,y:by2,w:20,h:20,label:'',fn:()=>{
+        skins.splice(idx,1); skinImgs.splice(idx,1);
+        if(selSkin===idx) selSkin=-1; else if(selSkin>idx) selSkin--;
+        saveSkins();
+      }});
+    }
+  }
+  const brow=py+phh-58;
+  button(px+20,brow,180,40,'Загрузить скин',()=>{ document.getElementById('fileIn').click(); }, {green:true});
+  button(px+pw-120,brow,100,40,'Закрыть',()=>{ heroOpen=false; });
+}
+
+// ================= панель настроек =================
+let bigFont=false, showFps=false, fpsVal=0;
+function drawSettingsPanel(kind){
+  const pw=380, phh=240, px=(W-pw)/2, py=(H-phh)/2;
+  ctx.fillStyle='#1a2030'; ctx.fillRect(px,py,pw,phh);
+  ctx.strokeStyle='#e8e8e8'; ctx.strokeRect(px,py,pw,phh);
+  ctx.fillStyle='#fff'; ctx.font='bold 18px monospace'; ctx.textAlign='center';
+  ctx.fillText(kind==='acc'?'Специальные возможности':'Настройки', W/2, py+34); ctx.textAlign='left';
+  if(kind==='acc'){
+    button(px+20,py+60,pw-40,40,'Крупный шрифт: '+(bigFont?'ВКЛ':'ВЫКЛ'),()=>{ bigFont=!bigFont; });
+    button(px+20,py+110,pw-40,40,'Показывать FPS: '+(showFps?'ВКЛ':'ВЫКЛ'),()=>{ showFps=!showFps; });
+  } else {
+    button(px+20,py+60,pw-40,40,'Управление: WASD / ПКМ — идти',()=>{});
+    button(px+20,py+110,pw-40,40,'X — атака, T — особая, C — выстрел',()=>{});
+  }
+  button(px+pw-120,py+phh-58,100,40,'Закрыть',()=>{ setPanel=null; });
+}
+
+// ================= лавка =================
+const SHOP=[
+  {id:'bow',   name:'Лук',          price:10},
+  {id:'arrows',name:'Стрелы ×10',   price:5},
+  {id:'gold',  name:'Золотой меч',  price:15},
+  {id:'diam',  name:'Алмазный меч', price:30},
+  {id:'potion',name:'Зелье лечения',price:4}
+];
+function drawShop(){
+  ctx.fillStyle='rgba(8,10,16,0.85)'; ctx.fillRect(0,0,W,H);
+  const pw=420, phh=400, px=(W-pw)/2, py=(H-phh)/2;
+  ctx.fillStyle='#1a2030'; ctx.fillRect(px,py,pw,phh);
+  ctx.strokeStyle='#3ddc6b'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,phh); ctx.lineWidth=1;
+  ctx.fillStyle='#fff'; ctx.font='bold 20px monospace'; ctx.textAlign='center';
+  ctx.fillText('ЛАВКА ЖИТЕЛЯ — Изумруды: '+player.emeralds, W/2, py+36); ctx.textAlign='left';
+  let y=py+60;
+  for(const s of SHOP){
+    ctx.fillStyle='rgba(40,46,60,0.9)'; ctx.fillRect(px+20,y,pw-40,52);
+    ctx.fillStyle='#fff'; ctx.font='15px monospace'; ctx.fillText(s.name, px+36, y+31);
+    ctx.fillStyle='#3ddc6b'; ctx.fillText(s.price+' ◆', px+pw-110, y+31);
+    const afford=player.emeralds>=s.price;
+    const bx3=px+pw-84, by3=y+10;
+    ctx.fillStyle=afford?'#3a7d2c':'#555'; ctx.fillRect(bx3,by3,64,32);
+    ctx.fillStyle='#fff'; ctx.font='bold 13px monospace'; ctx.textAlign='center';
+    ctx.fillText('Купить', bx3+32, by3+21); ctx.textAlign='left';
+    if(afford){
+      const sid=s.id;
+      buttons.push({x:bx3,y:by3,w:64,h:32,label:'',fn:()=>buy(sid)});
+    }
+    y+=60;
+  }
+  button(px+pw/2-60,py+phh-56,120,40,'Закрыть',()=>{ shopOpen=false; });
+}
+function buy(id){
+  const s=SHOP.find(v=>v.id===id);
+  if(!s || player.emeralds<s.price) return;
+  player.emeralds-=s.price;
+  if(id==='bow') player.hasBow=true;
+  else if(id==='arrows') player.arrows+=10;
+  else if(id==='gold') player.weapon='gold';
+  else if(id==='diam') player.weapon='diamond';
+  else if(id==='potion') player.potions++;
+  flash('Куплено: '+s.name);
+}
+
+// ================= инвентарь =================
+function drawInv(){
+  ctx.fillStyle='rgba(8,10,16,0.85)'; ctx.fillRect(0,0,W,H);
+  const pw=380, phh=300, px=(W-pw)/2, py=(H-phh)/2;
+  ctx.fillStyle='#1a2030'; ctx.fillRect(px,py,pw,phh);
+  ctx.strokeStyle='#e8e8e8'; ctx.lineWidth=2; ctx.strokeRect(px,py,pw,phh); ctx.lineWidth=1;
+  ctx.fillStyle='#fff'; ctx.font='bold 20px monospace'; ctx.textAlign='center';
+  ctx.fillText('ИНВЕНТАРЬ (мобы заморожены)', W/2, py+36); ctx.textAlign='left';
+  const rows=[
+    ['Оружие', WEAP[player.weapon].name],
+    ['Лук', player.hasBow?'есть':'нет'],
+    ['Стрелы', player.arrows],
+    ['Зелья', player.potions],
+    ['Изумруды', player.emeralds],
+    ['Шкала душ', Math.floor(player.souls)+' / 100']
+  ];
+  let y=py+64;
+  ctx.font='15px monospace';
+  for(const r of rows){
+    ctx.fillStyle='#9ab'; ctx.fillText(r[0], px+30, y);
+    ctx.fillStyle='#fff'; ctx.textAlign='right'; ctx.fillText(String(r[1]), px+pw-30, y); ctx.textAlign='left';
+    y+=32;
+  }
+  button(px+pw/2-60,py+phh-56,120,40,'Закрыть',()=>{ invOpen=false; });
+}
+
+// ================= оверлеи состояний =================
+function drawPause(){
+  ctx.fillStyle='rgba(8,10,16,0.75)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#fff'; ctx.font='bold 30px monospace'; ctx.textAlign='center';
+  ctx.fillText('ПАУЗА', W/2, H/2-90); ctx.textAlign='left';
+  buttons=[];
+  button(W/2-140,H/2-40,280,46,'Продолжить',()=>{ state=ST.PLAY; }, {green:true});
+  button(W/2-140,H/2+20,280,46,'Выйти в меню',()=>{ doSave(); state=ST.MENU; });
+}
+function drawDead(){
+  ctx.fillStyle='rgba(30,0,0,0.7)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#f55'; ctx.font='bold 40px monospace'; ctx.textAlign='center';
+  ctx.fillText('ВЫ ПОГИБЛИ', W/2, H/2-80); ctx.textAlign='left';
+  buttons=[];
+  button(W/2-140,H/2-20,280,46,'Возродиться',()=>{
+    player.x=0; player.y=60; player.hp=player.maxHp; player.souls=0;
+    player.hasTarget=false; cam.x=player.x-W/2; cam.y=player.y-H/2;
+    state=ST.PLAY;
+  }, {green:true});
+  button(W/2-140,H/2+40,280,46,'Выйти в меню',()=>{ state=ST.MENU; });
+}
+function drawOver(){
+  ctx.fillStyle='rgba(10,4,4,0.85)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#f55'; ctx.font='bold 40px monospace'; ctx.textAlign='center';
+  ctx.fillText('ДЕРЕВНЯ РАЗРУШЕНА', W/2, H/2-80); ctx.textAlign='left';
+  buttons=[];
+  button(W/2-140,H/2-20,280,46,'Начать заново',()=>{ resetGame(); state=ST.PLAY; }, {green:true});
+  button(W/2-140,H/2+40,280,46,'В меню',()=>{ state=ST.MENU; });
+}
+
+// ================= загрузка скина =================
+document.getElementById('fileIn').addEventListener('change', function(){
+  const f=this.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=function(){
+    const im=new Image();
+    im.onload=function(){
+      const n=skins.length;
+      skins.push({name:f.name.replace(/\.[^.]+$/,'').slice(0,14), data:rd.result});
+      skinImgs.push(im);
+      selSkin=n;
+      saveSkins();
+    };
+    im.src=rd.result;
+  };
+  rd.readAsDataURL(f);
+  this.value='';
+});
+
+// ================= проверка целостности деревни =================
+function checkVillage(){
+  if(state!==ST.PLAY) return;
+  if(houses.every(h=>h.hp<=0)) state=ST.OVER;
+}
+
+// ================= главный цикл =================
+let last=performance.now();
+function loop(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  buttons=[];
+  if(state===ST.MENU){ drawMenu(); }
+  else {
+    update(dt);
+    drawWorld();
+    drawHUD();
+    if(shopOpen){ drawShop(); }
+    if(invOpen){ drawInv(); }
+    if(state===ST.PAUSE) drawPause();
+    if(state===ST.DEAD) drawDead();
+    if(state===ST.OVER) drawOver();
+    checkVillage();
+  }
+  if(bigFont) ctx.font='16px monospace';
+  if(showFps){ fpsVal=fpsVal*0.95+(1/Math.max(dt,0.001))*0.05;
+    ctx.fillStyle='#7f7'; ctx.font='12px monospace'; ctx.fillText(Math.round(fpsVal)+' FPS', 12, H-12); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
